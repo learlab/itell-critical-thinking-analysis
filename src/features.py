@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import textdistance
+from lexicalrichness import LexicalRichness
 
 if TYPE_CHECKING:
     import spacy
@@ -91,11 +92,13 @@ def sentence_count(doc: Doc) -> int:
     return max(1, len(sents)) if doc.text.strip() else 0
 
 
-def type_token_ratio(doc: Doc) -> float:
-    toks = [t.lower_ for t in doc if t.is_alpha]
-    if not toks:
+def mtld(doc: Doc, threshold: float = 0.72) -> float:
+    """Measure of Textual Lexical Diversity (McCarthy & Jarvis 2010).
+    Uses the text from the spaCy Doc for consistency with other features."""
+    text = doc.text.strip()
+    if not text or word_count(doc) < 2:
         return 0.0
-    return len(set(toks)) / len(toks)
+    return LexicalRichness(text).mtld(threshold=threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +175,7 @@ def compute_all(
     feats: dict[str, float] = {
         "word_count": word_count(doc),
         "sentence_count": sentence_count(doc),
-        "type_token_ratio": type_token_ratio(doc),
+        "mtld": mtld(doc),
     }
     feats.update(category_similarity_bins(doc, centroids))
     return feats
@@ -181,7 +184,7 @@ def compute_all(
 SURFACE_COLUMNS = [
     "word_count",
     "sentence_count",
-    "type_token_ratio",
+    "mtld",
 ]
 
 CATEGORY_BIN_COLUMNS = [
