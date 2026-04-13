@@ -2,7 +2,10 @@
 
 All feature functions operate on spaCy Doc objects (except Levenshtein, which
 takes raw strings). Category-similarity features use en_core_web_lg word
-vectors and Empath's seed word lists, replicating Empath's approach locally.
+vectors and Empath's seed word lists. Thresholds are data-driven: for each
+category, we compute the within-list mean and SD of cosine similarity between
+each seed word and its category centroid, then count essay tokens whose
+similarity to the centroid exceeds mean - 1*SD.
 """
 from __future__ import annotations
 
@@ -25,26 +28,12 @@ CRITICAL_THINKING_SEEDS = [
     "justify", "interpret", "consider", "assume", "conclude",
 ]
 
-EMPATH_BUILTIN_CATEGORIES = [
-    "science", "philosophy", "negotiate", "communication", "confusion",
-]
-
-ALL_CATEGORIES = EMPATH_BUILTIN_CATEGORIES + ["critical_thinking"]
-
-# Similarity bins: token cosine-similarity to category centroid.
-# Calibrated against en_core_web_lg (300-dim GloVe). Seed-word self-similarity
-# medians range 0.52–0.76; cross-category means 0.17–0.36.
-SIMILARITY_BINS = [
-    ("strong",   0.50, np.inf),   # core category words
-    ("moderate", 0.35, 0.50),     # domain-adjacent
-    ("weak",     0.20, 0.35),     # marginal association
-]
+ALL_CATEGORIES = ["critical_thinking", "confusion"]
 
 
 def load_seed_words() -> dict[str, list[str]]:
-    """Load Empath built-in seed words from the installed package's TSV,
+    """Load Empath's confusion seed words from the installed package's TSV,
     plus our custom critical_thinking seeds."""
-    # Find the empath categories.tsv — try common install locations.
     candidates = list(Path("/").glob("**/empath/data/categories.tsv"))
     if not candidates:
         raise FileNotFoundError("Cannot locate empath/data/categories.tsv")
@@ -56,9 +45,10 @@ def load_seed_words() -> dict[str, list[str]]:
             cols = line.strip().split("\t")
             cats[cols[0]] = cols[1:]
 
-    seeds = {c: cats[c] for c in EMPATH_BUILTIN_CATEGORIES}
-    seeds["critical_thinking"] = CRITICAL_THINKING_SEEDS
-    return seeds
+    return {
+        "critical_thinking": CRITICAL_THINKING_SEEDS,
+        "confusion": cats["confusion"],
+    }
 
 
 def build_centroids(
@@ -72,6 +62,26 @@ def build_centroids(
             raise ValueError(f"No vectors found for category '{cat}'")
         centroids[cat] = np.mean(vecs, axis=0)
     return centroids
+
+
+def build_thresholds(
+    nlp: spacy.Language,
+    seeds: dict[str, list[str]],
+    centroids: dict[str, np.ndarray],
+) -> dict[str, float]:
+    """Compute a data-driven similarity threshold for each category.
+
+    For each seed list, we calculate the cosine similarity of every seed word
+    to its own centroid, then set the threshold at mean - 1*SD. This means a
+    token must be at least as similar to the centroid as the lower-end members
+    of the category itself.
+    """
+    thresholds: dict[str, float] = {}
+    for cat, words in seeds.items():
+        vecs = [nlp.vocab[w].vector for w in words if nlp.vocab[w].has_vector]
+        sims = np.array([_cosine_sim(v, centroids[cat]) for v in vecs])
+        thresholds[cat] = float(sims.mean() - sims.std())
+    return thresholds
 
 
 # ---------------------------------------------------------------------------
@@ -111,32 +121,24 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom)
 
 
-def category_similarity_bins(
-    doc: Doc, centroids: dict[str, np.ndarray]
+def category_similarity_counts(
+    doc: Doc,
+    centroids: dict[str, np.ndarray],
+    thresholds: dict[str, float],
 ) -> dict[str, float]:
     """For each content token, compute cosine similarity to each category
-    centroid and bin into tiers. Returns counts per 100 words."""
+    centroid and count tokens exceeding the data-driven threshold.
+    Returns counts per 100 words."""
     wc = word_count(doc)
     if wc == 0:
-        return {
-            f"{cat}_{bname}": 0.0
-            for cat in centroids
-            for bname, _, _ in SIMILARITY_BINS
-        }
+        return {cat: 0.0 for cat in centroids}
 
-    # Pre-compute similarities: (n_tokens, n_categories)
     content = _content_tokens(doc)
     result: dict[str, float] = {}
     for cat, centroid in centroids.items():
-        bin_counts = {bname: 0 for bname, _, _ in SIMILARITY_BINS}
-        for tok in content:
-            sim = _cosine_sim(tok.vector, centroid)
-            for bname, lo, hi in SIMILARITY_BINS:
-                if lo <= sim < hi:
-                    bin_counts[bname] += 1
-                    break
-        for bname in bin_counts:
-            result[f"{cat}_{bname}"] = 100.0 * bin_counts[bname] / wc
+        thresh = thresholds[cat]
+        hits = sum(1 for tok in content if _cosine_sim(tok.vector, centroid) >= thresh)
+        result[cat] = 100.0 * hits / wc
     return result
 
 
@@ -165,6 +167,7 @@ def compute_all(
     text: str,
     nlp: spacy.Language,
     centroids: dict[str, np.ndarray],
+    thresholds: dict[str, float],
 ) -> dict[str, float]:
     """Compute the full feature set for a single summary text."""
     if not isinstance(text, str) or not text.strip():
@@ -177,7 +180,7 @@ def compute_all(
         "sentence_count": sentence_count(doc),
         "mtld": mtld(doc),
     }
-    feats.update(category_similarity_bins(doc, centroids))
+    feats.update(category_similarity_counts(doc, centroids, thresholds))
     return feats
 
 
@@ -187,10 +190,4 @@ SURFACE_COLUMNS = [
     "mtld",
 ]
 
-CATEGORY_BIN_COLUMNS = [
-    f"{cat}_{bname}"
-    for cat in ALL_CATEGORIES
-    for bname, _, _ in SIMILARITY_BINS
-]
-
-FEATURE_COLUMNS = SURFACE_COLUMNS + CATEGORY_BIN_COLUMNS
+FEATURE_COLUMNS = SURFACE_COLUMNS + ALL_CATEGORIES
