@@ -196,6 +196,13 @@ def main() -> None:
     import matplotlib.pyplot as plt
     plot_feats = ["word_count", "sentence_count", "content_score",
                   "critical_thinking", "confusion"]
+    feat_labels = {
+        "word_count": "word count",
+        "sentence_count": "sentence count",
+        "content_score": "content",
+        "critical_thinking": "cognition",
+        "confusion": "uncertainty",
+    }
     groups = ["control_full", "stairs_low", "stairs_medium", "stairs_high"]
     labels = ["control\n(n=110)",
               f"low\n(n={(stairs.engagement_tier=='low').sum()})",
@@ -204,11 +211,10 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(groups))
     width = 0.16
-    colors = ["#888", "#bdd", "#9cc", "#5aa", "#266"]
     for i, feat in enumerate(plot_feats):
         vals = [pivot.loc[feat, g] if g in pivot.columns else np.nan for g in groups]
         offset = (i - (len(plot_feats) - 1) / 2) * width
-        ax.bar(x + offset, vals, width, label=feat)
+        ax.bar(x + offset, vals, width, label=feat_labels[feat])
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.axhline(0, color="black", lw=0.5)
